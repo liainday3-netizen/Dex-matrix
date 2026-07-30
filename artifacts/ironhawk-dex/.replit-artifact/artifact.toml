@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "IronHawk DEX Scanner"
+version = "1.0.0"
+id = "artifacts/ironhawk-dex"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22028
+
+[services.development]
+run = "pnpm --filter @workspace/ironhawk-dex run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/ironhawk-dex", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/ironhawk-dex/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22028"
+BASE_PATH = "/"

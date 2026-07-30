@@ -3,20 +3,24 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: IronHawk DEX Scanner API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: scanner
+    description: Scanner pair management and states
+  - name: market
+    description: Market data from DEXes (no API keys)
+
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,13 +28,819 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /scanner/pairs:
+    get:
+      operationId: listPairs
+      tags: [scanner]
+      summary: List all watched pairs with microstructure state
+      responses:
+        "200":
+          description: List of watched pairs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WatchedPair"
+    post:
+      operationId: addPair
+      tags: [scanner]
+      summary: Add a pair to the scanner watchlist
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PairInput"
+      responses:
+        "201":
+          description: Pair added
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WatchedPair"
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Pair already being watched
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /scanner/pairs/{id}:
+    delete:
+      operationId: removePair
+      tags: [scanner]
+      summary: Remove a pair from the watchlist
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: number
+      responses:
+        "204":
+          description: Removed
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /scanner/signals:
+    get:
+      operationId: listSignals
+      tags: [scanner]
+      summary: List recent BUY/SELL execution signals
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: number
+            default: 50
+      responses:
+        "200":
+          description: List of signals
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Signal"
+
+  /scanner/stats:
+    get:
+      operationId: getScannerStats
+      tags: [scanner]
+      summary: Aggregate scanner statistics
+      responses:
+        "200":
+          description: Stats summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScannerStats"
+
+  /trader/positions:
+    get:
+      operationId: listPositions
+      tags: [trader]
+      summary: List all trading positions
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [OPEN, PARTIAL, CLOSED, FAILED, all]
+            default: all
+        - name: chain
+          in: query
+          schema:
+            type: string
+            enum: [ethereum, base, solana, all]
+            default: all
+      responses:
+        "200":
+          description: List of positions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Position"
+
+  /trader/positions/{id}/close:
+    post:
+      operationId: closePosition
+      tags: [trader]
+      summary: Close or partially close a position
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: number
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClosePositionInput"
+      responses:
+        "200":
+          description: Close result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClosePositionResult"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /trader/execute:
+    post:
+      operationId: executeSignal
+      tags: [trader]
+      summary: Manually execute a signal for a watched pair
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecuteSignalInput"
+      responses:
+        "200":
+          description: Execution result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecuteSignalResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /trader/capital:
+    get:
+      operationId: getCapital
+      tags: [trader]
+      summary: Get capital config and performance for all chains
+      responses:
+        "200":
+          description: Capital configs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CapitalSummary"
+    patch:
+      operationId: updateCapital
+      tags: [trader]
+      summary: Update capital settings for a chain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CapitalUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapitalSummary"
+
+  /trader/performance:
+    get:
+      operationId: getPerformance
+      tags: [trader]
+      summary: P&L performance summary across all chains
+      responses:
+        "200":
+          description: Performance data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PerformanceSummary"
+
+  /market/search:
+    get:
+      operationId: searchPairs
+      tags: [market]
+      summary: Search DEX pairs by token name or symbol
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: chain
+          in: query
+          schema:
+            type: string
+            enum: [ethereum, base, solana, all]
+            default: all
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/MarketPair"
+
+  /market/trending:
+    get:
+      operationId: getTrendingPairs
+      tags: [market]
+      summary: Get trending DEX pairs by chain
+      parameters:
+        - name: chain
+          in: query
+          schema:
+            type: string
+            enum: [ethereum, base, solana]
+            default: ethereum
+      responses:
+        "200":
+          description: Trending pairs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/MarketPair"
+
+  /market/candles:
+    get:
+      operationId: getCandles
+      tags: [market]
+      summary: Get OHLCV candles for a DEX pair
+      parameters:
+        - name: pairAddress
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: chain
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [ethereum, base, solana]
+        - name: timeframe
+          in: query
+          schema:
+            type: string
+            enum: [1m, 5m, 15m, 1h, 4h, 1d]
+            default: 1h
+      responses:
+        "200":
+          description: OHLCV candles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Candle"
+
 components:
   schemas:
     HealthStatus:
       type: object
+      required: [status]
       properties:
         status:
           type: string
-      required:
-        - status
 
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    WatchedPair:
+      type: object
+      required:
+        - id
+        - symbol
+        - baseToken
+        - quoteToken
+        - chain
+        - dex
+        - pairAddress
+        - state
+        - htfMessage
+        - ltfMessage
+        - signalAction
+        - currentPrice
+        - priceChange24h
+        - volume24h
+        - obType
+        - obHigh
+        - obLow
+        - lastScannedAt
+        - addedAt
+      properties:
+        id:
+          type: number
+        symbol:
+          type: string
+          description: e.g. "WETH/USDC"
+        baseToken:
+          type: string
+        quoteToken:
+          type: string
+        chain:
+          type: string
+          enum: [ethereum, base, solana]
+        dex:
+          type: string
+        pairAddress:
+          type: string
+        state:
+          type: string
+          enum:
+            - WAITING
+            - FILTERED_BIAS
+            - OUT_OF_SESSION
+            - SYNC_ERROR
+            - IN_HTF_POI
+            - BULL_EXEC
+            - BEAR_EXEC
+        htfMessage:
+          type: string
+        ltfMessage:
+          type: string
+        signalAction:
+          type: string
+        currentPrice:
+          type: number
+        priceChange24h:
+          type: number
+        volume24h:
+          type: number
+        obType:
+          type: ["string", "null"]
+          enum: [BULL, BEAR, null]
+        obHigh:
+          type: ["number", "null"]
+        obLow:
+          type: ["number", "null"]
+        lastScannedAt:
+          type: ["string", "null"]
+        addedAt:
+          type: string
+
+    PairInput:
+      type: object
+      required: [pairAddress, chain]
+      properties:
+        pairAddress:
+          type: string
+          description: DEX pair contract address
+        chain:
+          type: string
+          enum: [ethereum, base, solana]
+        customLabel:
+          type: ["string", "null"]
+
+    Signal:
+      type: object
+      required:
+        - id
+        - pairId
+        - symbol
+        - chain
+        - dex
+        - direction
+        - price
+        - obHigh
+        - obLow
+        - ltfMessage
+        - triggeredAt
+      properties:
+        id:
+          type: number
+        pairId:
+          type: number
+        symbol:
+          type: string
+        chain:
+          type: string
+        dex:
+          type: string
+        direction:
+          type: string
+          enum: [BUY, SELL]
+        price:
+          type: number
+        obHigh:
+          type: number
+        obLow:
+          type: number
+        ltfMessage:
+          type: string
+        triggeredAt:
+          type: string
+
+    ScannerStats:
+      type: object
+      required:
+        - totalPairs
+        - activeBull
+        - activeBear
+        - inPoi
+        - waiting
+        - filteredBias
+        - outOfSession
+        - signalsToday
+        - signalsTotal
+        - chainBreakdown
+      properties:
+        totalPairs:
+          type: number
+        activeBull:
+          type: number
+        activeBear:
+          type: number
+        inPoi:
+          type: number
+        waiting:
+          type: number
+        filteredBias:
+          type: number
+        outOfSession:
+          type: number
+        signalsToday:
+          type: number
+        signalsTotal:
+          type: number
+        chainBreakdown:
+          type: object
+          additionalProperties:
+            type: number
+
+    MarketPair:
+      type: object
+      required:
+        - pairAddress
+        - symbol
+        - baseToken
+        - quoteToken
+        - chain
+        - dex
+        - price
+        - priceChange24h
+        - volume24h
+        - liquidity
+        - txns24h
+      properties:
+        pairAddress:
+          type: string
+        symbol:
+          type: string
+        baseToken:
+          type: string
+        quoteToken:
+          type: string
+        chain:
+          type: string
+        dex:
+          type: string
+        price:
+          type: number
+        priceChange24h:
+          type: number
+        volume24h:
+          type: number
+        liquidity:
+          type: number
+        txns24h:
+          type: number
+
+    Candle:
+      type: object
+      required: [time, open, high, low, close, volume]
+      properties:
+        time:
+          type: number
+          description: Unix timestamp in seconds
+        open:
+          type: number
+        high:
+          type: number
+        low:
+          type: number
+        close:
+          type: number
+        volume:
+          type: number
+
+    TakeProfitLevel:
+      type: object
+      required: [pct, multiplier, hit]
+      properties:
+        pct:
+          type: number
+          description: Percentage of position to close at this level
+        multiplier:
+          type: number
+          description: Price multiplier trigger (e.g. 1.5 = +50%)
+        hit:
+          type: boolean
+
+    Position:
+      type: object
+      required:
+        - id
+        - pairId
+        - symbol
+        - chain
+        - dex
+        - direction
+        - status
+        - entryPrice
+        - entryAmountUsd
+        - tokenAmountIn
+        - tokenAmountOut
+        - capitalAtEntry
+        - riskPct
+        - openedAt
+      properties:
+        id:
+          type: number
+        pairId:
+          type: number
+        signalId:
+          type: ["number", "null"]
+        symbol:
+          type: string
+        chain:
+          type: string
+        dex:
+          type: string
+        direction:
+          type: string
+          enum: [BUY, SELL]
+        status:
+          type: string
+          enum: [OPEN, PARTIAL, CLOSED, FAILED]
+        entryPrice:
+          type: number
+        entryAmountUsd:
+          type: number
+        tokenAmountIn:
+          type: number
+        tokenAmountOut:
+          type: number
+        entryTxHash:
+          type: ["string", "null"]
+        capitalAtEntry:
+          type: number
+        riskPct:
+          type: number
+        exitPrice:
+          type: ["number", "null"]
+        exitAmountUsd:
+          type: ["number", "null"]
+        exitTxHash:
+          type: ["string", "null"]
+        realizedPnlUsd:
+          type: ["number", "null"]
+        realizedPnlPct:
+          type: ["number", "null"]
+        tpLevels:
+          type: ["string", "null"]
+        stopLossPrice:
+          type: ["number", "null"]
+        stopLossPct:
+          type: ["number", "null"]
+        obHigh:
+          type: ["number", "null"]
+        obLow:
+          type: ["number", "null"]
+        walletAddress:
+          type: ["string", "null"]
+        openedAt:
+          type: string
+        closedAt:
+          type: ["string", "null"]
+        notes:
+          type: ["string", "null"]
+
+    ClosePositionInput:
+      type: object
+      required: [pctToClose]
+      properties:
+        pctToClose:
+          type: number
+          description: Percentage of position to close (1-100)
+
+    ClosePositionResult:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+        pnlUsd:
+          type: ["number", "null"]
+        txHash:
+          type: ["string", "null"]
+        error:
+          type: ["string", "null"]
+
+    ExecuteSignalInput:
+      type: object
+      required: [pairId, direction, tokenAddress]
+      properties:
+        pairId:
+          type: number
+        direction:
+          type: string
+          enum: [BUY, SELL]
+        tokenAddress:
+          type: string
+        tokenDecimals:
+          type: number
+
+    ExecuteSignalResult:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+        positionId:
+          type: ["number", "null"]
+        txHash:
+          type: ["string", "null"]
+        positionSizeUsd:
+          type: ["number", "null"]
+        error:
+          type: ["string", "null"]
+
+    CapitalSummary:
+      type: object
+      required:
+        - chain
+        - initialCapital
+        - currentCapital
+        - totalPnlUsd
+        - totalReturnPct
+        - totalTrades
+        - winRate
+        - wins
+        - losses
+        - scalingTier
+        - riskPct
+        - nextPositionSizeUsd
+        - autoExecute
+      properties:
+        chain:
+          type: string
+        initialCapital:
+          type: number
+        currentCapital:
+          type: number
+        totalPnlUsd:
+          type: number
+        totalReturnPct:
+          type: number
+        totalTrades:
+          type: number
+        winRate:
+          type: number
+        wins:
+          type: number
+        losses:
+          type: number
+        scalingTier:
+          type: string
+          enum: [CONSERVATIVE, STANDARD, AGGRESSIVE, INSTITUTIONAL]
+        riskPct:
+          type: number
+        nextPositionSizeUsd:
+          type: number
+        autoExecute:
+          type: boolean
+        walletAddress:
+          type: ["string", "null"]
+
+    CapitalUpdate:
+      type: object
+      required: [chain]
+      properties:
+        chain:
+          type: string
+          enum: [ethereum, base, solana]
+        initialCapitalUsd:
+          type: number
+        riskPct:
+          type: number
+        maxRiskPct:
+          type: number
+        stopLossPct:
+          type: number
+        maxPositionUsd:
+          type: number
+        maxConcurrentPositions:
+          type: number
+        autoExecute:
+          type: boolean
+        walletAddress:
+          type: string
+
+    ChainPerformance:
+      type: object
+      required:
+        - chain
+        - initialCapital
+        - currentCapital
+        - totalPnlUsd
+        - totalReturnPct
+        - totalTrades
+        - winRate
+        - wins
+        - losses
+        - scalingTier
+        - nextPositionSizeUsd
+      properties:
+        chain:
+          type: string
+        initialCapital:
+          type: number
+        currentCapital:
+          type: number
+        totalPnlUsd:
+          type: number
+        totalReturnPct:
+          type: number
+        totalTrades:
+          type: number
+        winRate:
+          type: number
+        wins:
+          type: number
+        losses:
+          type: number
+        scalingTier:
+          type: string
+        nextPositionSizeUsd:
+          type: number
+
+    PerformanceSummary:
+      type: object
+      required: [chains, totalPnlUsd, totalReturnPct, totalTrades, winRate, openPositions, bestChain]
+      properties:
+        chains:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChainPerformance"
+        totalPnlUsd:
+          type: number
+        totalReturnPct:
+          type: number
+        totalTrades:
+          type: number
+        winRate:
+          type: number
+        openPositions:
+          type: number
+        bestChain:
+          type: ["string", "null"]
