@@ -39,15 +39,30 @@ const DEFAULT_TP_LEVELS: TakeProfitLevel[] = [
   { pct: 34, multiplier: 3.0, hit: false },   // close remainder at +200%
 ];
 
+/**
+ * Scaling tiers — smooth ramp from $10 → $5,000 → beyond.
+ *
+ * Growth path (55% win rate, 1:2 risk/reward, compounded):
+ *   $10  → MICRO       (1 trade at a time, build the base)
+ *   $50  → STARTER     (begin compounding position size)
+ *   $200 → CONSERVATIVE (2 concurrent, steady growth toward $2k)
+ *   $500 → STANDARD    ($5k target zone — 3 concurrent, 3% risk)
+ *   $5k  → GROWTH      (4 concurrent, accelerating scale)
+ *   $25k → AGGRESSIVE  (5 concurrent, institutional pace)
+ *   $100k→ INSTITUTIONAL(8 concurrent, full capital deployment)
+ */
 function getScalingTier(capital: number): {
   riskPct: number;
   maxConcurrent: number;
   label: string;
 } {
-  if (capital >= 100_000) return { riskPct: 5, maxConcurrent: 6, label: "INSTITUTIONAL" };
-  if (capital >= 25_000)  return { riskPct: 4, maxConcurrent: 5, label: "AGGRESSIVE" };
-  if (capital >= 5_000)   return { riskPct: 3, maxConcurrent: 4, label: "STANDARD" };
-  return { riskPct: 2, maxConcurrent: 3, label: "CONSERVATIVE" };
+  if (capital >= 100_000) return { riskPct: 5, maxConcurrent: 8, label: "INSTITUTIONAL" };
+  if (capital >= 25_000)  return { riskPct: 5, maxConcurrent: 6, label: "AGGRESSIVE" };
+  if (capital >= 5_000)   return { riskPct: 4, maxConcurrent: 5, label: "GROWTH" };
+  if (capital >= 500)     return { riskPct: 3, maxConcurrent: 3, label: "STANDARD" };
+  if (capital >= 200)     return { riskPct: 3, maxConcurrent: 2, label: "CONSERVATIVE" };
+  if (capital >= 50)      return { riskPct: 5, maxConcurrent: 2, label: "STARTER" };
+  return                         { riskPct: 10, maxConcurrent: 1, label: "MICRO" };
 }
 
 // Absolute minimum capital to open any trade — $10
