@@ -1,6 +1,26 @@
 /**
  * Market data fetcher using DexScreener and GeckoTerminal public APIs.
  * No API keys required.
+ *
+ * CANDLE ORDERING CONTRACT (fix/execution-correctness)
+ * ------------------------------------------------
+ * `getOHLCV` returns NEWEST-FIRST: index 0 is the live/current bar, index 1
+ * is the most recent closed bar. GeckoTerminal serves oldest-first, so the
+ * response is reversed here.
+ *
+ * The previous version also `.reverse()`d, but the caller (microstructure.ts)
+ * assumed oldest-first. One side had to be wrong and the analysis silently
+ * ran on the wrong candles. The contract is now stated, enforced by an
+ * explicit sort on timestamp, and consumed by a matching `ensureNewestFirst`
+ * guard on the analysis side.
+ *
+ * FETCH FAILURES ARE NO LONGER SILENT
+ * -----------------------------------
+ * `[]` used to be returned on any HTTP error, which upstream became
+ * "insufficient data" -> WAITING — indistinguishable from a genuinely quiet
+ * market, and therefore unalertable. Failures now throw a typed
+ * `MarketDataError` so the scanner can record SYNC_ERROR and the operator
+ * can see the difference.
  */
 
 export interface OHLCVCandle {
@@ -24,6 +44,18 @@ export interface DexPair {
   volume24h: number;
   liquidity: number;
   txns24h: number;
+}
+
+/** Raised when a market-data source cannot be reached or answers unusably. */
+export class MarketDataError extends Error {
+  constructor(
+    message: string,
+    readonly source: string,
+    readonly status?: number
+  ) {
+    super(message);
+    this.name = "MarketDataError";
+  }
 }
 
 // DexScreener chain IDs
@@ -68,8 +100,15 @@ function parseDexScreenerPair(p: any, chain: string): DexPair {
 
 export async function searchDexPairs(q: string, chain: string = "all"): Promise<DexPair[]> {
   const url = `https://api.dexscreener.com/latest/dex/search/?q=${encodeURIComponent(q)}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  if (!res.ok) return [];
+  let res: Response;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  } catch (err: any) {
+    throw new MarketDataError(`Search request failed: ${err?.message ?? err}`, "dexscreener");
+  }
+  if (!res.ok) {
+    throw new MarketDataError(`Search returned ${res.status}`, "dexscreener", res.status);
+  }
   const data = (await res.json()) as { pairs?: unknown[] };
   const pairs: unknown[] = data.pairs ?? [];
   return (pairs as any[])
@@ -81,12 +120,17 @@ export async function searchDexPairs(q: string, chain: string = "all"): Promise<
 export async function getTrendingPairs(chain: string = "ethereum"): Promise<DexPair[]> {
   const geckoNetwork = GECKO_NETWORK_MAP[chain] ?? "eth";
   const url = `https://api.geckoterminal.com/api/v2/networks/${geckoNetwork}/trending_pools?page=1`;
-  const res = await fetch(url, {
-    headers: { Accept: "application/json;version=20230302" },
-    signal: AbortSignal.timeout(8000),
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: { Accept: "application/json;version=20230302" },
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch (err: any) {
+    // Fallback is an explicit degradation, not a silent one.
+    return searchDexPairs("weth usdc", chain);
+  }
   if (!res.ok) {
-    // fallback to DexScreener top pools
     return searchDexPairs("weth usdc", chain);
   }
   const data = (await res.json()) as { data?: any[] };
@@ -96,10 +140,10 @@ export async function getTrendingPairs(chain: string = "ethereum"): Promise<DexP
     return {
       pairAddress: attr.address ?? p.id ?? "",
       symbol: attr.name ?? "",
-      baseToken: attr.base_token_price_usd ? attr.name?.split(" / ")?.[0] ?? "" : "",
+      baseToken: attr.base_token_price_usd ? (attr.name?.split(" / ")?.[0] ?? "") : "",
       quoteToken: attr.name?.split(" / ")?.[1] ?? "USD",
       chain,
-      dex: attr.dex_id ?? attr.pool_created_at ?? "",
+      dex: attr.dex_id ?? "",
       price: parseFloat(attr.base_token_price_usd ?? "0") || 0,
       priceChange24h: parseFloat(attr.price_change_percentage?.h24 ?? "0") || 0,
       volume24h: parseFloat(attr.volume_usd?.h24 ?? "0") || 0,
@@ -109,17 +153,36 @@ export async function getTrendingPairs(chain: string = "ethereum"): Promise<DexP
   });
 }
 
+/**
+ * Fetch metadata for a single pair. Returns null when the pair is genuinely
+ * unknown to the source; throws MarketDataError when the source is down, so
+ * "no such pair" and "could not ask" are distinguishable.
+ */
 export async function getPairInfo(pairAddress: string, chain: string): Promise<DexPair | null> {
   const chainId = CHAIN_MAP[chain] ?? chain;
   const url = `https://api.dexscreener.com/latest/dex/pairs/${chainId}/${pairAddress}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  if (!res.ok) return null;
+  let res: Response;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  } catch (err: any) {
+    throw new MarketDataError(`Pair lookup failed: ${err?.message ?? err}`, "dexscreener");
+  }
+  if (!res.ok) {
+    throw new MarketDataError(`Pair lookup returned ${res.status}`, "dexscreener", res.status);
+  }
   const data = (await res.json()) as { pair?: any; pairs?: any[] };
   const pair = data.pair ?? data.pairs?.[0];
   if (!pair) return null;
   return parseDexScreenerPair(pair, chain);
 }
 
+/**
+ * Fetch OHLCV candles, NEWEST-FIRST.
+ *
+ * Throws MarketDataError on transport failure or a non-OK status. An empty
+ * array is only ever returned when the source answered successfully with no
+ * bars — never as a stand-in for an error.
+ */
 export async function getOHLCV(
   pairAddress: string,
   chain: string,
@@ -129,22 +192,50 @@ export async function getOHLCV(
   const tf = GECKO_TIMEFRAME_MAP[timeframe] ?? { aggregate: "hour", period: "1" };
   const url = `https://api.geckoterminal.com/api/v2/networks/${geckoNetwork}/pools/${pairAddress}/ohlcv/${tf.aggregate}?aggregate=${tf.period}&limit=200&currency=usd&token=base`;
 
-  const res = await fetch(url, {
-    headers: { Accept: "application/json;version=20230302" },
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) return [];
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: { Accept: "application/json;version=20230302" },
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch (err: any) {
+    throw new MarketDataError(
+      `OHLCV ${timeframe} fetch failed: ${err?.message ?? err}`,
+      "geckoterminal"
+    );
+  }
+  if (!res.ok) {
+    throw new MarketDataError(
+      `OHLCV ${timeframe} returned ${res.status}`,
+      "geckoterminal",
+      res.status
+    );
+  }
+
   const data = (await res.json()) as { data?: { attributes?: { ohlcv_list?: any[][] } } };
   const ohlcvList: any[][] = data.data?.attributes?.ohlcv_list ?? [];
-  // GeckoTerminal returns [timestamp, open, high, low, close, volume]
-  return ohlcvList
+
+  const candles: OHLCVCandle[] = ohlcvList
     .map(([t, o, h, l, c, v]) => ({
-      time: Math.floor(t / 1000), // ms -> seconds
+      time: Math.floor(Number(t) / 1000), // ms -> seconds
       open: Number(o),
       high: Number(h),
       low: Number(l),
       close: Number(c),
       volume: Number(v),
     }))
-    .reverse(); // oldest first
+    .filter(
+      (c) =>
+        Number.isFinite(c.time) &&
+        Number.isFinite(c.open) &&
+        Number.isFinite(c.high) &&
+        Number.isFinite(c.low) &&
+        Number.isFinite(c.close)
+    );
+
+  // Sort explicitly on timestamp rather than trusting the upstream order to
+  // be the reverse of what it happens to be today.
+  candles.sort((a, b) => b.time - a.time);
+
+  return candles;
 }
